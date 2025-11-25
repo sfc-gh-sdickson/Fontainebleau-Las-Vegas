@@ -87,7 +87,7 @@ ALTER TABLE INCIDENT_REPORTS SET CHANGE_TRACKING = TRUE;
 -- ============================================================================
 INSERT INTO GUEST_REVIEWS
 SELECT
-    'REV' || LPAD(SEQ4(), 10, '0') AS review_id,
+    'REV' || LPAD(ROW_NUMBER() OVER (ORDER BY r.reservation_id), 10, '0') AS review_id,
     g.guest_id,
     r.reservation_id,
     CASE (ABS(RANDOM()) % 20)
@@ -860,7 +860,7 @@ Nevada Gaming License: [License Number]$$,
 -- ============================================================================
 INSERT INTO INCIDENT_REPORTS
 SELECT
-    'INC' || LPAD(SEQ4(), 10, '0') AS incident_id,
+    'INC' || LPAD(ROW_NUMBER() OVER (ORDER BY gf.feedback_id), 10, '0') AS incident_id,
     gf.feedback_id,
     gf.guest_id,
     gf.reservation_id,

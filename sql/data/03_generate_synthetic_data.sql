@@ -130,7 +130,7 @@ FROM TABLE(GENERATOR(ROWCOUNT => 50000));
 -- ============================================================================
 INSERT INTO LOYALTY_PROGRAM
 SELECT
-    'LOY' || LPAD(SEQ4(), 10, '0') AS loyalty_id,
+    'LOY' || LPAD(ROW_NUMBER() OVER (ORDER BY g.guest_id), 10, '0') AS loyalty_id,
     g.guest_id,
     g.loyalty_number,
     g.loyalty_tier AS current_tier,
@@ -155,7 +155,7 @@ WHERE UNIFORM(0, 100, RANDOM()) < 80;
 -- ============================================================================
 INSERT INTO RESERVATIONS
 SELECT
-    'RES' || LPAD(SEQ4(), 10, '0') AS reservation_id,
+    'RES' || LPAD(ROW_NUMBER() OVER (ORDER BY g.guest_id, dates.check_in), 10, '0') AS reservation_id,
     g.guest_id,
     r.room_id,
     rt.room_type_id,
@@ -232,7 +232,7 @@ INSERT INTO RESTAURANTS VALUES
 -- ============================================================================
 INSERT INTO MENU_ITEMS
 SELECT
-    'MENU' || LPAD(SEQ4(), 8, '0') AS menu_item_id,
+    'MENU' || LPAD(ROW_NUMBER() OVER (ORDER BY r.restaurant_id), 8, '0') AS menu_item_id,
     r.restaurant_id,
     CASE 
         WHEN r.cuisine_type = 'STEAKHOUSE' THEN ARRAY_CONSTRUCT('Filet Mignon', 'NY Strip', 'Ribeye', 'Porterhouse', 'Wagyu A5', 'Bone-in Ribeye', 'Tomahawk', 'Surf and Turf')[UNIFORM(0, 7, RANDOM())]
@@ -266,7 +266,7 @@ WHERE r.restaurant_id IS NOT NULL;
 -- ============================================================================
 INSERT INTO DINING_ORDERS
 SELECT
-    'ORD' || LPAD(SEQ4(), 10, '0') AS order_id,
+    'ORD' || LPAD(ROW_NUMBER() OVER (ORDER BY g.guest_id, r.restaurant_id), 10, '0') AS order_id,
     NULL AS dining_reservation_id,
     g.guest_id,
     r.restaurant_id,
@@ -352,7 +352,7 @@ FROM TABLE(GENERATOR(ROWCOUNT => 100));
 -- ============================================================================
 INSERT INTO SPA_APPOINTMENTS
 SELECT
-    'SPAAPPT' || LPAD(SEQ4(), 10, '0') AS appointment_id,
+    'SPAAPPT' || LPAD(ROW_NUMBER() OVER (ORDER BY g.guest_id, s.service_id), 10, '0') AS appointment_id,
     g.guest_id,
     res.reservation_id,
     s.service_id,
@@ -398,9 +398,9 @@ SET total_amount = price - discount_amount + tip_amount;
 -- ============================================================================
 INSERT INTO GAMING_PLAYERS
 SELECT
-    'PLAYER' || LPAD(SEQ4(), 8, '0') AS player_id,
+    'PLAYER' || LPAD(ROW_NUMBER() OVER (ORDER BY g.guest_id), 8, '0') AS player_id,
     g.guest_id,
-    'FBLV' || LPAD(SEQ4(), 10, '0') AS player_card_number,
+    'FBLV' || LPAD(ROW_NUMBER() OVER (ORDER BY g.guest_id), 10, '0') AS player_card_number,
     CASE WHEN UNIFORM(0, 100, RANDOM()) < 50 THEN 'MEMBER'
          WHEN UNIFORM(0, 100, RANDOM()) < 30 THEN 'SILVER'
          WHEN UNIFORM(0, 100, RANDOM()) < 15 THEN 'GOLD'
@@ -432,7 +432,7 @@ LIMIT 30000;
 -- ============================================================================
 INSERT INTO GAMING_TRANSACTIONS
 SELECT
-    'GTRANS' || LPAD(SEQ4(), 12, '0') AS transaction_id,
+    'GTRANS' || LPAD(ROW_NUMBER() OVER (ORDER BY p.player_id), 12, '0') AS transaction_id,
     p.player_id,
     p.guest_id,
     res.reservation_id,
@@ -478,7 +478,7 @@ INSERT INTO EVENT_VENUES VALUES
 -- ============================================================================
 INSERT INTO EVENTS
 SELECT
-    'EVT' || LPAD(SEQ4(), 8, '0') AS event_id,
+    'EVT' || LPAD(ROW_NUMBER() OVER (ORDER BY v.venue_id), 8, '0') AS event_id,
     CASE 
         WHEN UNIFORM(0, 100, RANDOM()) < 25 THEN ARRAY_CONSTRUCT('Annual Sales Conference', 'Leadership Summit', 'Product Launch', 'Investor Meeting', 'Board Retreat')[UNIFORM(0, 4, RANDOM())]
         WHEN UNIFORM(0, 100, RANDOM()) < 25 THEN ARRAY_CONSTRUCT('Wedding Reception', 'Anniversary Celebration', 'Birthday Gala', 'Quinceañera', 'Bar Mitzvah')[UNIFORM(0, 4, RANDOM())]
@@ -489,15 +489,15 @@ SELECT
     v.venue_id,
     ARRAY_CONSTRUCT('Smith Event Planning', 'Corporate Events Inc', 'Luxury Weddings', 'Las Vegas Meetings', 'Private Client')[UNIFORM(0, 4, RANDOM())] AS organizer_name,
     ARRAY_CONSTRUCT('ABC Corporation', 'Tech Solutions Inc', 'Smith Family', 'Johnson Industries', 'Medical Association')[UNIFORM(0, 4, RANDOM())] AS organizer_company,
-    'events' || SEQ4() || '@' || ARRAY_CONSTRUCT('company.com', 'gmail.com', 'planners.com')[UNIFORM(0, 2, RANDOM())] AS organizer_email,
+    'events' || ROW_NUMBER() OVER (ORDER BY v.venue_id) || '@' || ARRAY_CONSTRUCT('company.com', 'gmail.com', 'planners.com')[UNIFORM(0, 2, RANDOM())] AS organizer_email,
     CONCAT('+1-', LPAD(UNIFORM(200, 999, RANDOM()), 3, '0'), '-555-', LPAD(UNIFORM(1000, 9999, RANDOM()), 4, '0')) AS organizer_phone,
     DATEADD('day', UNIFORM(-365, 365, RANDOM()), CURRENT_DATE()) AS event_date,
     TO_TIME(LPAD(UNIFORM(8, 20, RANDOM()), 2, '0') || ':00:00') AS start_time,
     TO_TIME(LPAD(UNIFORM(12, 23, RANDOM()), 2, '0') || ':00:00') AS end_time,
     TIMEADD('hour', -2, TO_TIME(LPAD(UNIFORM(8, 20, RANDOM()), 2, '0') || ':00:00')) AS setup_time,
     TIMEADD('hour', 2, TO_TIME(LPAD(UNIFORM(12, 23, RANDOM()), 2, '0') || ':00:00')) AS teardown_time,
-    UNIFORM(50, CASE WHEN v.capacity_reception IS NOT NULL THEN v.capacity_reception ELSE 500 END, RANDOM()) AS expected_attendance,
-    UNIFORM(40, CASE WHEN v.capacity_reception IS NOT NULL THEN v.capacity_reception ELSE 500 END, RANDOM()) AS actual_attendance,
+    LEAST(UNIFORM(50, 500, RANDOM()), COALESCE(v.capacity_reception, 500)) AS expected_attendance,
+    LEAST(UNIFORM(40, 500, RANDOM()), COALESCE(v.capacity_reception, 500)) AS actual_attendance,
     CASE WHEN UNIFORM(0, 100, RANDOM()) < 85 THEN 'COMPLETED'
          WHEN UNIFORM(0, 100, RANDOM()) < 10 THEN 'CONFIRMED'
          ELSE 'CANCELLED' END AS event_status,
@@ -514,7 +514,7 @@ LIMIT 10000;
 -- ============================================================================
 INSERT INTO EVENT_BOOKINGS
 SELECT
-    'EVTBK' || LPAD(SEQ4(), 10, '0') AS booking_id,
+    'EVTBK' || LPAD(ROW_NUMBER() OVER (ORDER BY e.event_id), 10, '0') AS booking_id,
     e.event_id,
     g.guest_id,
     e.event_type AS booking_type,
@@ -575,7 +575,7 @@ FROM TABLE(GENERATOR(ROWCOUNT => 3000));
 -- ============================================================================
 INSERT INTO GUEST_FEEDBACK
 SELECT
-    'FDBK' || LPAD(SEQ4(), 10, '0') AS feedback_id,
+    'FDBK' || LPAD(ROW_NUMBER() OVER (ORDER BY res.reservation_id), 10, '0') AS feedback_id,
     g.guest_id,
     res.reservation_id,
     DATEADD('day', UNIFORM(0, 7, RANDOM()), res.check_out_date) AS feedback_date,
@@ -615,7 +615,7 @@ LIMIT 25000;
 -- ============================================================================
 INSERT INTO AMENITY_USAGE
 SELECT
-    'AMEN' || LPAD(SEQ4(), 10, '0') AS usage_id,
+    'AMEN' || LPAD(ROW_NUMBER() OVER (ORDER BY res.reservation_id), 10, '0') AS usage_id,
     g.guest_id,
     res.reservation_id,
     ARRAY_CONSTRUCT('POOL', 'FITNESS_CENTER', 'BUSINESS_CENTER', 'CABANA', 'BEACH_CLUB')[UNIFORM(0, 4, RANDOM())] AS amenity_type,
@@ -626,7 +626,7 @@ SELECT
         WHEN UNIFORM(0, 100, RANDOM()) < 10 THEN 'Business Center'
         ELSE 'Beach Club'
     END AS amenity_name,
-    DATEADD('day', UNIFORM(0, res.nights - 1, RANDOM()), res.check_in_date) AS usage_date,
+    DATEADD('day', MOD(ABS(RANDOM()), GREATEST(res.nights, 1)), res.check_in_date) AS usage_date,
     TO_TIME(LPAD(UNIFORM(6, 20, RANDOM()), 2, '0') || ':' || LPAD(UNIFORM(0, 59, RANDOM()), 2, '0') || ':00') AS start_time,
     TIMEADD('minute', UNIFORM(30, 240, RANDOM()), TO_TIME(LPAD(UNIFORM(6, 20, RANDOM()), 2, '0') || ':' || LPAD(UNIFORM(0, 59, RANDOM()), 2, '0') || ':00')) AS end_time,
     UNIFORM(30, 240, RANDOM()) AS duration_minutes,
