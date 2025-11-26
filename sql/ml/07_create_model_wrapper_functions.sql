@@ -49,50 +49,41 @@ def predict_satisfaction(session, loyalty_tier_filter):
     reg = Registry(session)
     model = reg.get_model("GUEST_SATISFACTION_PREDICTOR").default
     
-    # Build query with optional filter (sanitize input)
-    tier_filter = ""
-    if loyalty_tier_filter and loyalty_tier_filter.upper() in ('MEMBER', 'SILVER', 'GOLD', 'PLATINUM'):
-        tier_filter = f"AND g.loyalty_tier = '{loyalty_tier_filter.upper()}'"
+    # Build query with optional filter
+    tier_filter = f"AND g.loyalty_tier = '{loyalty_tier_filter}'" if loyalty_tier_filter else ""
     
-    # Query structured EXACTLY like notebook training data (Cell 7)
-    # Column names must be UPPERCASE to match model expectations
+    # Query uses VERIFIED column names from 02_create_tables.sql:
+    # - GUESTS: loyalty_tier, total_spend, vip_status
+    # - RESERVATIONS: adults, children, total_room_revenue, booking_channel
+    # - ROOM_TYPES: room_category
+    # - GUEST_FEEDBACK: overall_rating (derive sentiment from rating)
     query = f"""
     SELECT
-        CASE WHEN g.loyalty_tier IN ('GOLD', 'PLATINUM') THEN TRUE ELSE FALSE END AS IS_LOYALTY_MEMBER,
-        COALESCE(g.total_spend, 0)::FLOAT AS GUEST_TOTAL_SPEND,
-        COALESCE(r.adults + r.children, 1)::FLOAT AS NUM_GUESTS,
-        COALESCE(r.total_room_revenue, 0)::FLOAT AS RESERVATION_PRICE,
-        COALESCE(r.nights, 1)::FLOAT AS STAY_DURATION_DAYS,
-        rt.room_category AS ROOM_CATEGORY,
-        r.booking_channel AS BOOKING_SOURCE,
-        COALESCE(gf.overall_rating, 3)::FLOAT AS SATISFACTION_RATING,
+        CASE WHEN g.loyalty_tier IN ('GOLD', 'PLATINUM') THEN TRUE ELSE FALSE END AS is_loyalty_member,
+        g.total_spend::FLOAT AS guest_total_spend,
+        (r.adults + r.children)::FLOAT AS num_guests,
+        r.total_room_revenue::FLOAT AS reservation_price,
+        r.nights::FLOAT AS stay_duration_days,
+        rt.room_category AS room_category,
+        r.booking_channel AS booking_source,
+        gf.overall_rating::FLOAT AS satisfaction_rating,
         -- Derive sentiment from overall_rating (1-5 scale)
         CASE 
             WHEN gf.overall_rating >= 4 THEN 2  -- POSITIVE
             WHEN gf.overall_rating = 3 THEN 1   -- NEUTRAL
             ELSE 0                               -- NEGATIVE
-        END AS SENTIMENT_LABEL
+        END AS sentiment_label
     FROM RAW.GUEST_FEEDBACK gf
     JOIN RAW.GUESTS g ON gf.guest_id = g.guest_id
     JOIN RAW.RESERVATIONS r ON gf.reservation_id = r.reservation_id
     JOIN RAW.ROOM_TYPES rt ON r.room_type_id = rt.room_type_id
-    WHERE gf.feedback_date >= DATEADD('month', -6, CURRENT_DATE())
+    WHERE gf.feedback_date >= DATEADD('month', -3, CURRENT_DATE())
       AND gf.overall_rating IS NOT NULL
-      AND r.booking_channel IS NOT NULL
-      AND rt.room_category IS NOT NULL
       {tier_filter}
     LIMIT 20
     """
     
     input_df = session.sql(query)
-    
-    # Check if we have data
-    row_count = input_df.count()
-    if row_count == 0:
-        return json.dumps({
-            "error": "No feedback data available for the specified criteria",
-            "loyalty_tier_filter": loyalty_tier_filter or "ALL"
-        })
     
     # Get predictions
     predictions = model.run(input_df, function_name="predict")
@@ -129,9 +120,11 @@ $$;
 --                 total_room_revenue, reservation_status, nights
 --   ROOMS: room_id
 --
--- MODEL INPUT COLUMNS (from notebook training):
---   MONTH_NUM, YEAR_NUM, TOTAL_RESERVATIONS, UNIQUE_GUESTS, ROOMS_BOOKED,
---   AVG_STAY_DURATION, AVG_BOOKING_VALUE, OCCUPANCY_RATE (target)
+-- DATA TYPES from notebook (Cell 14):
+--   month_num: INTEGER (not cast)
+--   year_num: INTEGER (not cast)
+--   total_reservations, unique_guests, rooms_booked, avg_stay_duration, 
+--   avg_booking_value, occupancy_rate: FLOAT
 -- ============================================================================
 
 CREATE OR REPLACE PROCEDURE FORECAST_ROOM_OCCUPANCY(
@@ -153,12 +146,12 @@ def forecast_occupancy(session, months_ahead):
     reg = Registry(session)
     model = reg.get_model("ROOM_OCCUPANCY_FORECASTER").default
     
-    # Query structured EXACTLY like notebook training data (Cell 14)
-    # Uses COALESCE to handle NULL values and ensure numeric types
+    # Query structured to match notebook training data exactly (Cell 14)
+    # Uses historical data for the same calendar month across all available years
+    # COALESCE ensures we never pass NULL to the model
     query = f"""
-    WITH historical_data AS (
+    WITH monthly_stats AS (
         SELECT
-            DATE_TRUNC('month', r.check_in_date)::DATE AS occupancy_month,
             MONTH(r.check_in_date) AS month_num,
             YEAR(r.check_in_date) AS year_num,
             COUNT(DISTINCT r.reservation_id)::FLOAT AS total_reservations,
@@ -170,9 +163,9 @@ def forecast_occupancy(session, months_ahead):
         FROM RAW.RESERVATIONS r
         WHERE r.check_in_date >= DATEADD('month', -24, CURRENT_DATE())
           AND r.reservation_status IN ('CONFIRMED', 'CHECKED_IN', 'CHECKED_OUT')
-        GROUP BY DATE_TRUNC('month', r.check_in_date), MONTH(r.check_in_date), YEAR(r.check_in_date)
+        GROUP BY MONTH(r.check_in_date), YEAR(r.check_in_date)
     ),
-    target_month_avg AS (
+    target_month_averages AS (
         SELECT
             AVG(total_reservations) AS avg_reservations,
             AVG(unique_guests) AS avg_guests,
@@ -180,28 +173,27 @@ def forecast_occupancy(session, months_ahead):
             AVG(avg_stay_duration) AS avg_duration,
             AVG(avg_booking_value) AS avg_value,
             AVG(occupancy_rate) AS avg_occupancy
-        FROM historical_data
+        FROM monthly_stats
         WHERE month_num = MONTH(DATEADD('month', {months_ahead}, CURRENT_DATE()))
     )
     SELECT
-        MONTH(DATEADD('month', {months_ahead}, CURRENT_DATE()))::FLOAT AS MONTH_NUM,
-        YEAR(DATEADD('month', {months_ahead}, CURRENT_DATE()))::FLOAT AS YEAR_NUM,
-        COALESCE(tma.avg_reservations, 500.0)::FLOAT AS TOTAL_RESERVATIONS,
-        COALESCE(tma.avg_guests, 400.0)::FLOAT AS UNIQUE_GUESTS,
-        COALESCE(tma.avg_rooms, 300.0)::FLOAT AS ROOMS_BOOKED,
-        COALESCE(tma.avg_duration, 3.0)::FLOAT AS AVG_STAY_DURATION,
-        COALESCE(tma.avg_value, 500.0)::FLOAT AS AVG_BOOKING_VALUE,
-        COALESCE(tma.avg_occupancy, 70.0)::FLOAT AS OCCUPANCY_RATE
-    FROM target_month_avg tma
+        MONTH(DATEADD('month', {months_ahead}, CURRENT_DATE())) AS month_num,
+        YEAR(DATEADD('month', {months_ahead}, CURRENT_DATE())) AS year_num,
+        COALESCE(tma.avg_reservations, 500.0)::FLOAT AS total_reservations,
+        COALESCE(tma.avg_guests, 400.0)::FLOAT AS unique_guests,
+        COALESCE(tma.avg_rooms, 300.0)::FLOAT AS rooms_booked,
+        COALESCE(tma.avg_duration, 3.0)::FLOAT AS avg_stay_duration,
+        COALESCE(tma.avg_value, 500.0)::FLOAT AS avg_booking_value,
+        COALESCE(tma.avg_occupancy, 70.0)::FLOAT AS occupancy_rate
+    FROM target_month_averages tma
     """
     
     input_df = session.sql(query)
     
-    # Check if we have data
-    row_count = input_df.count()
-    if row_count == 0:
+    # Verify we have data before calling model
+    if input_df.count() == 0:
         return json.dumps({
-            "error": "No historical data available for prediction",
+            "error": "No data available for prediction",
             "months_ahead": months_ahead
         })
     
@@ -232,10 +224,6 @@ $$;
 -- 
 -- VERIFIED COLUMNS:
 --   SPA_APPOINTMENTS: appointment_id, appointment_date, total_amount, appointment_status
---
--- MODEL INPUT COLUMNS (from notebook training - Cell 21):
---   DAY_OF_WEEK, MONTH_NUM, APPOINTMENT_COUNT, AVG_APPOINTMENT_AMOUNT,
---   TOTAL_DAILY_REVENUE, HIGH_DEMAND
 -- ============================================================================
 
 CREATE OR REPLACE PROCEDURE PREDICT_SPA_DEMAND(
@@ -257,50 +245,29 @@ def predict_demand(session, days_ahead):
     reg = Registry(session)
     model = reg.get_model("SPA_DEMAND_PREDICTOR").default
     
-    # Query structured EXACTLY like notebook training data (Cell 21)
-    # Column names must match exactly (uppercase)
+    # Query uses VERIFIED columns from SPA_APPOINTMENTS table
     query = f"""
-    WITH daily_data AS (
-        SELECT
-            sa.appointment_date,
-            DAYOFWEEK(sa.appointment_date)::FLOAT AS DAY_OF_WEEK,
-            MONTH(sa.appointment_date) AS MONTH_NUM,
-            COUNT(DISTINCT sa.appointment_id)::FLOAT AS APPOINTMENT_COUNT,
-            AVG(sa.total_amount)::FLOAT AS AVG_APPOINTMENT_AMOUNT,
-            SUM(sa.total_amount)::FLOAT AS TOTAL_DAILY_REVENUE,
-            CASE WHEN COUNT(DISTINCT sa.appointment_id) > 20 THEN 1 ELSE 0 END AS HIGH_DEMAND
-        FROM RAW.SPA_APPOINTMENTS sa
-        WHERE sa.appointment_date >= DATEADD('year', -1, CURRENT_DATE())
-          AND sa.appointment_status IN ('CONFIRMED', 'COMPLETED')
-        GROUP BY sa.appointment_date, DAYOFWEEK(sa.appointment_date), MONTH(sa.appointment_date)
-    ),
-    day_averages AS (
-        SELECT
-            AVG(APPOINTMENT_COUNT) AS avg_count,
-            AVG(AVG_APPOINTMENT_AMOUNT) AS avg_amount,
-            AVG(TOTAL_DAILY_REVENUE) AS avg_revenue
-        FROM daily_data
-        WHERE DAY_OF_WEEK = DAYOFWEEK(DATEADD('day', {days_ahead}, CURRENT_DATE()))
-    )
     SELECT
-        DAYOFWEEK(DATEADD('day', {days_ahead}, CURRENT_DATE()))::FLOAT AS DAY_OF_WEEK,
-        MONTH(DATEADD('day', {days_ahead}, CURRENT_DATE()))::FLOAT AS MONTH_NUM,
-        COALESCE(da.avg_count, 15.0)::FLOAT AS APPOINTMENT_COUNT,
-        COALESCE(da.avg_amount, 250.0)::FLOAT AS AVG_APPOINTMENT_AMOUNT,
-        COALESCE(da.avg_revenue, 3000.0)::FLOAT AS TOTAL_DAILY_REVENUE,
-        CASE WHEN COALESCE(da.avg_count, 15.0) > 20 THEN 1 ELSE 0 END AS HIGH_DEMAND
-    FROM day_averages da
+        DAYOFWEEK(DATEADD('day', {days_ahead}, CURRENT_DATE()))::FLOAT AS day_of_week,
+        MONTH(DATEADD('day', {days_ahead}, CURRENT_DATE())) AS month_num,
+        AVG(appointment_count)::FLOAT AS appointment_count,
+        AVG(avg_amount)::FLOAT AS avg_appointment_amount,
+        AVG(total_revenue)::FLOAT AS total_daily_revenue,
+        CASE WHEN AVG(appointment_count) > 20 THEN 1 ELSE 0 END AS high_demand
+    FROM (
+        SELECT
+            COUNT(DISTINCT sa.appointment_id)::FLOAT AS appointment_count,
+            AVG(sa.total_amount)::FLOAT AS avg_amount,
+            SUM(sa.total_amount)::FLOAT AS total_revenue
+        FROM RAW.SPA_APPOINTMENTS sa
+        WHERE sa.appointment_date >= DATEADD('day', -90, CURRENT_DATE())
+          AND sa.appointment_status IN ('CONFIRMED', 'COMPLETED')
+          AND DAYOFWEEK(sa.appointment_date) = DAYOFWEEK(DATEADD('day', {days_ahead}, CURRENT_DATE()))
+        GROUP BY sa.appointment_date
+    )
     """
     
     input_df = session.sql(query)
-    
-    # Check if we have data
-    row_count = input_df.count()
-    if row_count == 0:
-        return json.dumps({
-            "error": "No historical data available for prediction",
-            "days_ahead": days_ahead
-        })
     
     # Get predictions
     predictions = model.run(input_df, function_name="predict")
